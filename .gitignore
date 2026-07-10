@@ -1,0 +1,18 @@
+# Nextflow run artifacts
+.nextflow/
+.nextflow.log
+.nextflow.log.*
+work/
+results/
+results_real/
+
+# Pipeline input data (large, not source)
+fastq/
+fastq_tmp/
+reference/
+
+# Third-party installer
+miniconda.sh
+
+# Local Claude Code settings
+.claude/settings.local.json
