@@ -23,7 +23,7 @@ Every classifier rule in FlowCast must trace to a line in this document (Cardina
 
 **Root cause of WT_REP1 specifically: Unknown.** Real candidates not yet distinguished — biological (this is a real wild-type vs. RAP1-depletion time-course; WT could carry different rRNA/contaminant load or RNA integrity) vs. batch/library-prep effect specific to this SRA run. Per Cardinal Rule 5, this stays Unknown until measured — FlowCast should not narrate a specific cause here.
 
-**Threshold: not set.** n=5 samples from one run is not enough to defend a generalizable absolute percentage cutoff (Cardinal Rule 4 — no inventing thresholds). What the real data *does* support: a **within-run relative outlier check** — flag a sample whose `unmapped_tooshort_percent` is roughly double the run's other samples (5.75% vs. a 2.75–3.19% cluster), rather than a fixed global number. This is the only claim the current data actually backs.
+**Threshold:** modified z-score (Iglewicz & Hoya 1993) on `unmapped_tooshort_percent` across the run's samples: `0.6745 × |x − median| / MAD`, flag if `> 3.5`. This is an established robust-statistics convention, not a value fit to this dataset (Cardinal Rule 4 — no inventing thresholds). On this run's real 5 samples, WT_REP1 scores 5.46 (flagged); all others score ≤ 0.86. Requires MAD > 0 (i.e., not all samples identical) to evaluate — with n=5 there's no claim beyond this one run's outlier check.
 
 ## Rule candidate 2: uniform FastQC `per_base_sequence_content` / `sequence_duplication_levels` fail — not yet a rule
 
