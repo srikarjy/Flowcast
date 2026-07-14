@@ -1,15 +1,56 @@
 # FlowCast
 
-A Go CLI that parses Nextflow's `trace.txt` and MultiQC's `multiqc_data.json`, applies a rule-based failure classifier built from real QC fields, and feeds an LLM narrator that only makes `Observed`/`Reported`/`Unknown`-tagged claims. See `CLAUDE.md` for the project's locked scope and rules, and `PROGRESS.md` for what's actually been built and verified against real data.
+FlowCast is a Go CLI that diagnoses nf-core/rnaseq pipeline runs. It parses Nextflow's `execution_trace.txt` and MultiQC's `multiqc_data.json`, runs a rule-based classifier over the real QC fields to flag outlier samples, and hands the findings to an LLM narrator that explains them — with every claim tagged by how well-supported it actually is.
 
-## Event log ordering tradeoffs
+## Why
 
-FlowCast's Go pipeline and Python narrator both write into one shared SQLite file (`internal/eventlog/eventlog.go`, `python/flowcast_sdk/eventlog.py`) with an identical `events` table, and `flowcast replay -eventlog <path>` lists every row `ORDER BY ts ASC, id ASC`, regardless of which language wrote it. This was proven against a real run — see `PROGRESS.md` §9.
+Pipeline QC reports are full of numbers but short on narration. FlowCast's narrator doesn't get to invent a root cause just because it sounds plausible — every claim it makes is tagged:
 
-**How ordering actually works, and its real limitation:**
+- **Observed** — a fact computed directly from the run's own numbers.
+- **Reported** — a documented mechanism, cited to its source, not inferred.
+- **Unknown** — the honest answer when the evidence doesn't support a causal claim. This is a normal, expected output, not a failure of the tool.
 
-- `ts` is wall-clock time, generated independently by each process (`time.Now().UTC()` in Go, `datetime.now(timezone.utc)` in Python) at the moment it inserts a row — there is no shared clock authority or vector clock coordinating the two languages. On one machine (the only case exercised so far) this is fine; across two machines it would only be as reliable as clock sync between them.
-- `id` is `INTEGER PRIMARY KEY AUTOINCREMENT`, global to the table regardless of which process's connection inserts a row, so it's a correct tiebreaker for same-timestamp rows in the order they actually landed in the file.
-- WAL mode + a 5-second `busy_timeout` let a process open the file after another has written to it without hitting a locked database, and let a process that finds it briefly locked wait instead of failing.
+## How it works
 
-**What the real §9 run did and didn't prove:** the Go pipeline ran to completion first (last event `02:19:39.1275Z`), and the Python narrator ran roughly 35 seconds later (first event `02:20:14.854Z`), reading back Go's `finding` event and appending its own `claim` events. `flowcast replay` correctly interleaved both languages' events by timestamp afterward. That's real proof that the shared log and timestamp-ordered replay work *across* languages — it is not proof that ordering holds up under *simultaneous* concurrent writes from both languages at once, which has never been exercised. If that's ever actually hit as a real limitation (Cardinal Rule 1: real bug first, not a hypothetical), it would need to be revisited then — not designed around now.
+1. **Parse** — `internal/nftrace` reads the tab-separated Nextflow trace; `internal/multiqc` reads the relevant STAR alignment section out of MultiQC's JSON.
+2. **Classify** — `internal/classify` runs a rule-based outlier check (a modified z-score over `unmapped_tooshort_percent` across samples) to flag samples that diverge from the run's own baseline.
+3. **Narrate** — `internal/narrator` sends the classifier's findings, plus a written causal-reasoning reference, to an LLM (OpenAI, structured JSON output) and returns confidence-tagged claims.
+4. **Event log + replay** — every stage can optionally emit events into a shared SQLite log (`internal/eventlog`), written to by both the Go pipeline and an independent Python narrator (`python/`). `flowcast replay` plays the whole log back, interleaved by timestamp, regardless of which language wrote which event.
+
+## Usage
+
+```bash
+go build -o flowcast ./cmd/flowcast
+
+# Run the pipeline: parse trace + MultiQC data, classify, narrate
+./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning reasoning.md
+
+# Same, but also write every stage's events into a shared SQLite log
+./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning reasoning.md -eventlog events.db
+
+# Replay the shared log, ordered by timestamp across languages
+./flowcast replay -eventlog events.db
+```
+
+The narrator reads its API key from `OPENAI_API_KEY`.
+
+### Python narrator
+
+A second, independently implemented narrator lives in `python/`, reading the same shared event log:
+
+```bash
+pip install -r python/requirements.txt
+python3 python/narrate.py --eventlog events.db --reasoning reasoning.md
+```
+
+## Event log ordering
+
+The Go pipeline and Python narrator write into one shared SQLite file with an identical `events` table (WAL mode, so a process opening the file after another has written to it doesn't hit a locked database). `flowcast replay` orders rows by `ts ASC, id ASC` — `ts` is wall-clock time from whichever process wrote the row, and `id` is a table-wide autoincrement that reliably tie-breaks same-timestamp rows in true insertion order. This has been exercised with one writer active at a time (Go finishes, then Python runs); simultaneous concurrent writes from both languages have not been tested.
+
+## Scope
+
+Go, standard library parsing, a rule-based (not ML) classifier, and an LLM API with structured JSON output. No Rust, FFI, local inference, vector databases, or Docker in FlowCast's own architecture. This is one narrowly-scoped diagnostic layer, not a provenance-capture or pipeline-orchestration tool.
+
+## Author
+
+srikar jy
