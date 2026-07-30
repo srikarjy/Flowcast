@@ -4,7 +4,7 @@
 .nextflow.log.*
 work/
 results/
-results_real/
+results_real*/
 
 # Pipeline input data (large, not source)
 fastq/
@@ -26,3 +26,9 @@ miniconda.sh
 python/__pycache__/
 python/**/__pycache__/
 *.pyc
+
+# User-testing session data (docs/user_testing_protocol.md) - collected, not source
+user_testing_results.csv
+
+# macOS
+.DS_Store

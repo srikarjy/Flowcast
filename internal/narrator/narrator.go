@@ -81,9 +81,9 @@ type responseFormat struct {
 }
 
 type chatCompletionRequest struct {
-	Model          string         `json:"model"`
-	Messages       []chatMessage  `json:"messages"`
-	ResponseFormat responseFormat `json:"response_format"`
+	Model          string          `json:"model"`
+	Messages       []chatMessage   `json:"messages"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 }
 
 type chatCompletionResponse struct {
@@ -97,6 +97,66 @@ type chatCompletionResponse struct {
 	} `json:"error"`
 }
 
+// buildFindingsPrompt renders findings plus the reasoning doc into the user
+// message shared by both the strict and naive narrator prompts.
+func buildFindingsPrompt(findings []classify.Finding, reasoningDoc string) string {
+	var b strings.Builder
+	b.WriteString("Classifier findings from this run:\n\n")
+	for _, f := range findings {
+		fmt.Fprintf(&b, "- rule=%s sample=%s detail=%s\n", f.Rule, f.Sample, f.Detail)
+	}
+	b.WriteString("\nCausal reasoning document (REASONING.md) — the only source of Reported mechanisms:\n\n")
+	b.WriteString(reasoningDoc)
+	return b.String()
+}
+
+// chatCompletion sends one Chat Completions request and returns the raw
+// message content string from the first choice.
+func chatCompletion(ctx context.Context, reqBody chatCompletionRequest) (string, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("narrator: OPENAI_API_KEY not set")
+	}
+
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("narrator: marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("narrator: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("narrator: openai api request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("narrator: read response: %w", err)
+	}
+
+	var out chatCompletionResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("narrator: decode response: %w (body: %s)", err, string(raw))
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("narrator: openai api error: %s", out.Error.Message)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("narrator: openai api returned status %d: %s", resp.StatusCode, string(raw))
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("narrator: no choices in response")
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
 // Narrate sends classifier findings plus the causal reasoning document to
 // the configured LLM and returns the confidence-tagged claims it produces.
 // reasoningDoc is the raw contents of REASONING.md — the only source of
@@ -107,26 +167,13 @@ func Narrate(ctx context.Context, findings []classify.Finding, reasoningDoc stri
 		return nil, nil
 	}
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("narrator: OPENAI_API_KEY not set")
-	}
-
-	var b strings.Builder
-	b.WriteString("Classifier findings from this run:\n\n")
-	for _, f := range findings {
-		fmt.Fprintf(&b, "- rule=%s sample=%s detail=%s\n", f.Rule, f.Sample, f.Detail)
-	}
-	b.WriteString("\nCausal reasoning document (REASONING.md) — the only source of Reported mechanisms:\n\n")
-	b.WriteString(reasoningDoc)
-
 	reqBody := chatCompletionRequest{
 		Model: model,
 		Messages: []chatMessage{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: b.String()},
+			{Role: "user", Content: buildFindingsPrompt(findings, reasoningDoc)},
 		},
-		ResponseFormat: responseFormat{
+		ResponseFormat: &responseFormat{
 			Type: "json_schema",
 			JSONSchema: jsonSchemaSpec{
 				Name:   "narrator_claims",
@@ -136,48 +183,57 @@ func Narrate(ctx context.Context, findings []classify.Finding, reasoningDoc stri
 		},
 	}
 
-	payload, err := json.Marshal(reqBody)
+	content, err := chatCompletion(ctx, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("narrator: marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("narrator: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("narrator: openai api request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("narrator: read response: %w", err)
-	}
-
-	var out chatCompletionResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("narrator: decode response: %w (body: %s)", err, string(raw))
-	}
-	if out.Error != nil {
-		return nil, fmt.Errorf("narrator: openai api error: %s", out.Error.Message)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("narrator: openai api returned status %d: %s", resp.StatusCode, string(raw))
-	}
-	if len(out.Choices) == 0 {
-		return nil, fmt.Errorf("narrator: no choices in response")
+		return nil, err
 	}
 
 	var parsed struct {
 		Claims []Claim `json:"claims"`
 	}
-	if err := json.Unmarshal([]byte(out.Choices[0].Message.Content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
 		return nil, fmt.Errorf("narrator: decode structured output: %w", err)
 	}
 	return parsed.Claims, nil
+}
+
+// naiveSystemPrompt is deliberately the ablation's control condition: no
+// confidence-tag discipline, no evidence-source requirement, no schema
+// constraint — just "explain the finding." This exists only to measure how
+// much of Narrate's confidence-tagging behavior comes from the prompt
+// discipline versus the model's own default tendencies (internal/eval
+// ablation.go).
+const naiveSystemPrompt = `You are a bioinformatics assistant. Explain the following nf-core/rnaseq QC classifier finding to a bioinformatics audience, including likely causes.`
+
+// NarrateNaive is the ablation control for Narrate: same findings and
+// reasoning doc, but without the confidence-tag/evidence-source system
+// prompt or structured schema. Returns free-text claims, split by line.
+// Exists to measure the unsupported-claim rate Narrate's discipline
+// prevents (see internal/eval.ScoreUnsupported).
+func NarrateNaive(ctx context.Context, findings []classify.Finding, reasoningDoc string) ([]string, error) {
+	if len(findings) == 0 {
+		return nil, nil
+	}
+
+	reqBody := chatCompletionRequest{
+		Model: model,
+		Messages: []chatMessage{
+			{Role: "system", Content: naiveSystemPrompt},
+			{Role: "user", Content: buildFindingsPrompt(findings, reasoningDoc)},
+		},
+	}
+
+	content, err := chatCompletion(ctx, reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	var claims []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "-"))
+		if line != "" {
+			claims = append(claims, line)
+		}
+	}
+	return claims, nil
 }

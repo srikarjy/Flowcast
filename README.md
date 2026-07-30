@@ -23,13 +23,22 @@ Pipeline QC reports are full of numbers but short on narration. FlowCast's narra
 go build -o flowcast ./cmd/flowcast
 
 # Run the pipeline: parse trace + MultiQC data, classify, narrate
-./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning reasoning.md
+./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning REASONING.md
 
 # Same, but also write every stage's events into a shared SQLite log
-./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning reasoning.md -eventlog events.db
+./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning REASONING.md -eventlog events.db
 
 # Replay the shared log, ordered by timestamp across languages
 ./flowcast replay -eventlog events.db
+
+# Synthetic classifier benchmark (bootstrapped from real baseline values, honestly labeled — see internal/eval)
+./flowcast eval -trials 2000 -seed 1
+
+# Live narrator ablation: strict vs. naive prompt, unsupported-claim rate (calls OpenAI, billed to OPENAI_API_KEY)
+./flowcast eval-narrator -trace execution_trace.txt -multiqc multiqc_data.json -reasoning REASONING.md
+
+# Combined scale counts across one or more real runs (comma-separated, matched by position)
+./flowcast stats -trace t1.txt,t2.txt -multiqc m1.json,m2.json
 ```
 
 The narrator reads its API key from `OPENAI_API_KEY`.
@@ -40,7 +49,7 @@ A second, independently implemented narrator lives in `python/`, reading the sam
 
 ```bash
 pip install -r python/requirements.txt
-python3 python/narrate.py --eventlog events.db --reasoning reasoning.md
+python3 python/narrate.py --eventlog events.db --reasoning REASONING.md
 ```
 
 ## Event log ordering
