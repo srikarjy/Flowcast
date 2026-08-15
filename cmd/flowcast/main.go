@@ -221,8 +221,8 @@ func runPipeline(args []string) {
 	eventlogPath := fs.String("eventlog", "", "optional path to a shared event log SQLite file to emit events into")
 	fs.Parse(args)
 
-	if *tracePath == "" || *multiqcPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: flowcast -trace <execution_trace.txt> -multiqc <multiqc_data.json>")
+	if *tracePath == "" {
+		fmt.Fprintln(os.Stderr, "usage: flowcast -trace <execution_trace.txt> [-multiqc <multiqc_data.json>]")
 		os.Exit(2)
 	}
 
@@ -266,21 +266,29 @@ func runPipeline(args []string) {
 		}
 	}
 
-	// Trace: load MultiQC stats
-	ctx, span = tracing.StartSpan(ctx, "load_multiqc")
-	stars, err := multiqc.LoadStarStats(*multiqcPath)
-	span.End()
-	if err != nil {
-		tracing.RecordError(ctx, err)
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("\nparsed STAR stats for %d samples from %s\n", len(stars), *multiqcPath)
-
-	// Trace: classify
+	// Trace: classify task-level failures — needs only the trace, not MultiQC,
+	// since a failed run may never reach the QC stage for the failed sample.
 	ctx, span = tracing.StartSpan(ctx, "classify")
-	findings := classify.UnmappedTooShortOutliers(stars)
+	findings := classify.FailedTasks(tasks)
 	span.End()
+
+	// Trace: load MultiQC stats, if provided, and run the outlier check.
+	if *multiqcPath != "" {
+		ctx, span = tracing.StartSpan(ctx, "load_multiqc")
+		stars, err := multiqc.LoadStarStats(*multiqcPath)
+		span.End()
+		if err != nil {
+			tracing.RecordError(ctx, err)
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("\nparsed STAR stats for %d samples from %s\n", len(stars), *multiqcPath)
+
+		ctx, span = tracing.StartSpan(ctx, "classify")
+		findings = append(findings, classify.UnmappedTooShortOutliers(stars)...)
+		span.End()
+	}
+
 	if len(findings) == 0 {
 		fmt.Println("classifier: no findings")
 		return

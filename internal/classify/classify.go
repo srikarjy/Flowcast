@@ -4,9 +4,11 @@ package classify
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 
 	"flowcast/internal/multiqc"
+	"flowcast/internal/nftrace"
 )
 
 // Finding is one classifier hit for one sample.
@@ -59,6 +61,41 @@ func UnmappedTooShortOutliers(samples map[string]multiqc.StarSample) []Finding {
 					values[i], z, med, mad, modifiedZScoreThreshold, s.MismatchRate, s.MultimappedPercent),
 			})
 		}
+	}
+	return findings
+}
+
+// taskSampleName extracts the sample name Nextflow appends in parentheses to
+// a task's process name, e.g. "...:STAR_ALIGN (WT_REP2)" -> "WT_REP2". Falls
+// back to the full process name when no parenthesized tag is present.
+var taskSampleName = regexp.MustCompile(`\(([^()]+)\)\s*$`)
+
+func sampleFromTaskName(name string) string {
+	if m := taskSampleName.FindStringSubmatch(name); m != nil {
+		return m[1]
+	}
+	return name
+}
+
+// FailedTasks implements REASONING.md rule candidate 3: any Nextflow task
+// with status FAILED is a real pipeline failure, not an outlier check on
+// otherwise-successful data. Unlike UnmappedTooShortOutliers, this needs no
+// baseline across samples — a single FAILED task is itself the finding.
+func FailedTasks(tasks []nftrace.Task) []Finding {
+	var findings []Finding
+	for _, t := range tasks {
+		if t.Status != "FAILED" {
+			continue
+		}
+		detail := fmt.Sprintf("process=%s status=%s exit=%s duration=%s", t.Name, t.Status, t.Exit, t.Duration)
+		if t.Exit == "137" {
+			detail += "; exit 137 is SIGKILL, commonly an out-of-memory kill under a configured resource limit, per REASONING.md"
+		}
+		findings = append(findings, Finding{
+			Sample: sampleFromTaskName(t.Name),
+			Rule:   "task_failed",
+			Detail: detail,
+		})
 	}
 	return findings
 }

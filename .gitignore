@@ -5,6 +5,8 @@
 work/
 results/
 results_real*/
+results_fail/
+fail_run.log
 
 # Pipeline input data (large, not source)
 fastq/
