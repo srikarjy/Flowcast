@@ -4,9 +4,7 @@ FlowCast is a Go CLI that diagnoses nf-core/rnaseq pipeline runs. It parses Next
 
 ## About
 
-This started as a question about a specific failure mode in bioinformatics tooling: pipeline QC reports (MultiQC, Nextflow trace files) surface plenty of numbers, but nothing that tells a wet-lab scientist *why* a sample looks off, and LLMs are happy to fill that gap with a plausible-sounding but unverified guess. FlowCast's actual bet isn't the classifier — it's the confidence-tagging discipline (`Observed` / `Reported` / `Unknown`) enforced end to end, from the reasoning document through the JSON schema. Every rule in the classifier has to trace to a documented mechanism in `REASONING.md` before it's allowed to exist; if it can't, it stays out, no matter how easy it would be to add.
-
-The project was built against real nf-core/rnaseq runs on real (if partial) sequencing data from a public yeast dataset — not synthetic fixtures. The first classifier rule (an outlier check on STAR's `unmapped_tooshort_percent`) is grounded in a real run that succeeded; a second rule was added later by deliberately inducing a real pipeline failure (a memory-starved STAR alignment step, genuinely OOM-killed) rather than fabricating a failure trace, specifically so the classifier's failure-detection claim would be backed by evidence, not just outlier detection on healthy data. See `STATUS.md` for the full build history.
+FlowCast diagnoses nf-core/rnaseq runs with a rule-based classifier and an LLM narrator that tags every claim `Observed`, `Reported`, or `Unknown` — never a guessed root cause. Licensed under MIT; see `STATUS.md` for the full build history.
 
 ## My honest opinion on the project
 
