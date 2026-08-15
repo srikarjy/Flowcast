@@ -1,6 +1,6 @@
 # FlowCast — Status, Roadmap, and Architecture Decisions
 
-Last updated: 2026-07-15. Written against commit `565ed6e` (branch `main`, clean).
+Last updated: 2026-08-15. Written against commit `9509208` (branch `feat/add-opentelemetry-tracing`, PR #2 open against `main`).
 
 This document consolidates what has actually been built and verified, what remains, and the architectural decisions taken along the way — including the ones that were deliberate exceptions to the project's own rules.
 
@@ -10,12 +10,15 @@ Everything in the "done" section below happened on real data from a real pipelin
 
 ## 1. Where the project stands
 
-FlowCast is a Go CLI that diagnoses nf-core/rnaseq runs. It parses Nextflow's `execution_trace.txt` and MultiQC's `multiqc_data.json`, applies a rule-based classifier to flag outlier samples, and sends the findings to an LLM narrator that returns confidence-tagged claims. A shared SQLite event log lets an independently written Python narrator consume the same findings, and `flowcast replay` plays back both languages' events in one timestamp-ordered stream.
+FlowCast is a Go CLI that diagnoses nf-core/rnaseq runs. It parses Nextflow's `execution_trace.txt` and MultiQC's `multiqc_data.json`, applies a rule-based classifier to flag outlier samples and outright task failures, and sends the findings to an LLM narrator that returns confidence-tagged claims. A shared SQLite event log lets an independently written Python narrator consume the same findings, and `flowcast replay` plays back both languages' events in one timestamp-ordered stream. OpenTelemetry spans instrument every pipeline stage.
 
 **v1 scope: complete and verified end-to-end on real data.**
 **v2 scope (event log, replay, Python SDK): complete and verified, with one documented limitation.**
+**v3 scope (task-level failure classifier, rule candidate 3): complete and verified against a real, deliberately induced failure (§2.9). Not yet verified: the narrator has not been run against this finding type — blocked on an `OPENAI_API_KEY` not being available in the environment where this was built.**
 
-Current build state: `go build ./...` and `go vet ./...` pass; `go test ./...` passes (`internal/classify` is the only package with tests).
+Current build state: `go build ./...` and `go vet ./...` pass; `go test ./...` passes. Test coverage: `internal/nftrace`, `internal/multiqc`, `internal/classify`, `internal/eval` — `internal/narrator`, `internal/eventlog`, and `internal/tracing` still have none.
+
+CI (`.github/workflows/ci.yml`) has been confirmed running green on real pushes and PR merges (verified via `gh run list`, 2026-08-15) — this was previously an open question (§3, old) and is now resolved.
 
 ---
 
@@ -90,24 +93,27 @@ The two narrators independently converging on the same confidence tags against t
 
 ### 2.8 CI and release workflows
 
-`.github/workflows/ci.yml` (build + vet + test on push/PR to main, Go 1.25) and `.github/workflows/release.yml` (builds the binary and publishes a GitHub Release on `v*.*.*` tags). CI was intentionally deferred until the real end-to-end run existed. Per the progress log, CI had not yet been observed running on an actual push — worth confirming.
+`.github/workflows/ci.yml` (build + vet + test on push/PR to main, Go 1.25) and `.github/workflows/release.yml` (builds the binary and publishes a GitHub Release on `v*.*.*` tags). **Confirmed running green** on real pushes and PR merges (`gh run list`, 2026-08-15) — resolves the open question below in §3.1 (old).
+
+### 2.9 v3: task-level failure classifier — verified against a real induced failure (2026-08-15)
+
+Every prior run had *succeeded* — every rule up to this point was a within-run outlier check on healthy data, not a failure classifier, which was the project's most significant real gap (previously tracked as §3.4, old). Closing it meant deliberately inducing a real pipeline failure, not fabricating a trace.
+
+Done by capping `STAR_ALIGN`'s memory at 400MB (`low_mem_fail.config`) — well below what STAR's alignment pass on the yeast genome actually needs — and rerunning the real pipeline against the same real data as the canonical baseline (§2.4). `STAR_ALIGN(WT_REP2)` completed genome loading and a real 1st-pass mapping (~4m26s of real work), started 2nd-pass mapping, and was genuinely SIGKILL'd: `execution_trace.txt` records `status=FAILED exit=137 duration=4m 33s`.
+
+`classify.FailedTasks` (rule candidate 3, documented in `REASONING.md`) flags any trace task with `status == FAILED`. Unlike rule candidate 1, it needs no baseline or sample spread — a single failed task is itself the finding — so it fires independent of run size and independent of whether MultiQC output exists for the failed sample (a real failure often means QC output for that sample was never produced). `-multiqc` is now optional on `flowcast run` for this reason.
+
+Real trace fixture (30 lines, 5.6KB) checked into `internal/classify/testdata/`, unlike the large `results_real` fixtures — small enough to version directly rather than gitignore, so `TestFailedTasks_RealFixture` runs unconditionally in CI rather than skipping when the fixture is absent.
+
+**Not yet verified:** the narrator has not been run against this finding type. The classifier and its detail string are proven; whether the narrator correctly tags a `task_failed` claim as Observed vs. Reported (exit-code semantics are a documented mechanism, arguably Reported rather than Observed) has not been checked, because `OPENAI_API_KEY` was not available in the environment where this was built. This is the one open item from v3.
 
 ---
 
 ## 3. Open issues and future tasks
 
-### 3.1 Blocking: `REASONING.md` is referenced everywhere but no longer in the repo
+### 3.1 (Resolved 2026-07-30) `REASONING.md` restoration
 
-Commit `565ed6e` removed `CLAUDE.md`, `PROGRESS.md`, `REASONING.md`, and `PORTFOLIO_REVIEW (1).md` as "internal planning docs." But `REASONING.md` is not internal planning — it is a **runtime input**:
-
-- `cmd/flowcast/main.go` defaults `-reasoning` to `REASONING.md`. With the file gone, a default invocation hits the `could not read reasoning doc` branch and **silently skips the narrator entirely**, exiting 0 after printing findings.
-- `internal/narrator` documents it as the only permitted source of `Reported` claims.
-- `internal/classify`, `internal/multiqc`, and `python/narrate.py` all cite it in doc comments that now point at nothing.
-- The README's usage examples pass `-reasoning reasoning.md`, a file that does not exist at any casing.
-
-So the repo currently ships a narrator that cannot make a `Reported` claim, and code comments referencing a document a reader cannot open. Both recovered docs are intact in git history at `565ed6e^`.
-
-Recommended fix: restore `REASONING.md` to the repo as a first-class runtime input (`git show 565ed6e^:REASONING.md > REASONING.md`), and correct the README's `reasoning.md` to `REASONING.md`. Whether `CLAUDE.md` and `PROGRESS.md` return is a separate judgment call — they genuinely are internal, and this document now covers their content — but the code comments citing "CLAUDE.md Cardinal Rule 5" should then be reworded to cite something a reader can actually find.
+Previously blocking: commit `565ed6e` had removed `REASONING.md` as an "internal planning doc," but it is a runtime input (`-reasoning` default, the only permitted source of `Reported` claims). Restored in commit `2ad4fc5` ("Restore REASONING.md, add classifier/narrator eval harness and scale tooling"). The README's usage examples correctly reference `REASONING.md`. No longer an open item — left here only so the history in §2 and the fix in git log line up for a reader.
 
 ### 3.2 Known limitation: concurrent cross-language writes untested
 
@@ -117,16 +123,16 @@ The replay proof ran Go and Python sequentially, about 35 seconds apart. This de
 
 Only if it traces to a resolved mechanism. Rule candidate 2 (uniform FastQC `per_base_sequence_content` / `sequence_duplication_levels` failures) has two live, undistinguished hypotheses: that standard polyA-selected mRNA-seq libraries characteristically fail exactly these two modules (random-hexamer priming bias plus highly-expressed-transcript duplication), in which case it is expected background and must **never** fire as a rule; or a dataset/extraction-level confound. Resolving it needs either literature grounding in published FastQC guidance for RNA-seq, or a second independent real dataset. It stays out of the classifier until then.
 
-### 3.4 No real failure case exists yet
+### 3.4 (Resolved 2026-08-15) Real failure case
 
-Both pipeline runs *succeeded*. Every rule so far is a within-run outlier check, not a failure classifier, because there is no real failed run to build failure rules from. Getting one would mean deliberately inducing a real failure — not fabricating a trace. This is the main thing standing between FlowCast and its stated purpose of diagnosing pipeline *failures*.
+Previously the main gap: every pipeline run had succeeded, so every rule was a within-run outlier check, not a failure classifier. Resolved in §2.9 — `classify.FailedTasks` was verified against a real, deliberately induced STAR_ALIGN OOM kill. Caveat: this is one real failure, not a corpus of failures — the rule's generality (any `status == FAILED` task) rests on exit-code semantics being a general Nextflow/OS mechanism, not on having seen many failure instances, which is the same defensibility argument as AD-2's threshold, applied to a different kind of rule.
 
 ### 3.5 Smaller items
 
-- Test coverage: only `internal/classify` has tests. `nftrace` header validation and `multiqc` decoding are both cheap to test against the real fixtures already on disk.
+- Test coverage: `nftrace`, `multiqc`, `classify`, and `eval` all have tests now. `narrator`, `eventlog`, and `tracing` still have none.
 - `WT_REP1`'s root cause remains genuinely Unknown — real candidates (biological wild-type variation in rRNA/contaminant load or RNA integrity, versus a batch/library-prep effect specific to this SRA run) are not distinguished by current data. This is a correct output, not a gap to close by guessing.
-- Confirm CI has actually run green on a push.
-- `.gitignore` hygiene: `flowcast_events.db` and 1.5MB of `.nextflow.log*` files are currently tracked or untracked-but-present in the working tree; `miniconda.sh` is a 155MB installer sitting in the repo root.
+- The narrator has not been run against the new `task_failed` finding type (§2.9) — needs `OPENAI_API_KEY`.
+- Working-tree clutter (already gitignored, not a repo problem, but worth a local cleanup): `flowcast_events.db`, ~2MB of `.nextflow.log*` files, and `miniconda.sh` (a 155MB installer) sitting in the repo root.
 
 ---
 
@@ -194,8 +200,8 @@ FlowCast is one narrow diagnostic layer. It does not compete with nf-prov / BCO 
 
 ## 5. Recommended order of work
 
-1. **Restore `REASONING.md`** and fix the README's `reasoning.md` reference (§3.1). The narrator is silently degraded until this is done — this is the only item currently breaking shipped behavior.
-2. Confirm CI has run green on a real push (§2.8).
+1. **Run the narrator against the real `task_failed` finding** (§2.9) — needs `OPENAI_API_KEY`; the last unverified link in v3.
+2. Merge PR #2 (task-level failure classifier) into `main` — currently open.
 3. Repo hygiene: `miniconda.sh`, `.nextflow.log*`, `flowcast_events.db` (§3.5).
-4. Add parser tests against the real fixtures already on disk (§3.5).
-5. Then, and only with a real reason: a real failure case (§3.4), or resolving rule candidate 2 (§3.3).
+4. Add tests for `internal/narrator` and `internal/eventlog` (§3.5).
+5. Then, and only with a real reason: resolving rule candidate 2 (§3.3), or a second independent real dataset to test rule candidate 3's generality (§3.4).
