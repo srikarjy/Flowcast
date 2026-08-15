@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"flowcast/internal/multiqc"
+	"flowcast/internal/nftrace"
 )
 
 func TestUnmappedTooShortOutliers(t *testing.T) {
@@ -74,5 +75,45 @@ func TestUnmappedTooShortOutliers(t *testing.T) {
 				t.Fatalf("expected rule 'unmapped_tooshort_outlier', got %q", findings[0].Rule)
 			}
 		})
+	}
+}
+
+func TestFailedTasks(t *testing.T) {
+	tasks := []nftrace.Task{
+		{TaskID: "30", Name: "NFCORE_RNASEQ:RNASEQ:ALIGN_STAR:STAR_ALIGN (WT_REP2)", Status: "FAILED", Exit: "137", Duration: "4m 33s"},
+		{TaskID: "31", Name: "NFCORE_RNASEQ:RNASEQ:ALIGN_STAR:STAR_ALIGN (RAP1_UNINDUCED_REP1)", Status: "ABORTED", Exit: "-"},
+		{TaskID: "1", Name: "NFCORE_RNASEQ:RNASEQ:FASTQC (WT_REP1)", Status: "COMPLETED", Exit: "0"},
+	}
+
+	findings := FailedTasks(tasks)
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Sample != "WT_REP2" {
+		t.Fatalf("expected flagged sample %q, got %q", "WT_REP2", findings[0].Sample)
+	}
+	if findings[0].Rule != "task_failed" {
+		t.Fatalf("expected rule 'task_failed', got %q", findings[0].Rule)
+	}
+}
+
+// realFailedTracePath is a real Nextflow execution_trace.txt from a
+// deliberately memory-starved nf-core/rnaseq run (STAR_ALIGN capped at
+// 400MB): WT_REP2's STAR_ALIGN task was genuinely SIGKILL'd (exit 137)
+// after real alignment work, not a fabricated fixture.
+const realFailedTracePath = "testdata/execution_trace_star_align_oom.txt"
+
+func TestFailedTasks_RealFixture(t *testing.T) {
+	tasks, err := nftrace.LoadTasks(realFailedTracePath)
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+
+	findings := FailedTasks(tasks)
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Sample != "WT_REP2" {
+		t.Fatalf("expected flagged sample %q, got %q", "WT_REP2", findings[0].Sample)
 	}
 }

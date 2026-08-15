@@ -35,5 +35,15 @@ Every classifier rule in FlowCast must trace to a line in this document (Cardina
 
 Not resolving this from the current single run. Needs either literature grounding (checking published FastQC guidance for standard RNA-seq) or a second independent real dataset before it can become — or be explicitly excluded as — a rule.
 
+## Rule candidate 3: task-level `FAILED` status (exit 137, out-of-memory kill)
+
+**Real observed data (deliberately memory-constrained nf-core/rnaseq run, 2026-08-15):** `STAR_ALIGN (WT_REP2)` was configured to run under a 400MB memory cap (below what STAR's alignment pass on this genome actually needs). It completed genome loading and 1st-pass mapping (~4m26s of real work), started 2nd-pass mapping, and was then killed. `execution_trace.txt` records `status=FAILED exit=137 duration=4m 33s`.
+
+**Mechanism (Reported — documented process semantics, not something FlowCast infers):** exit code 137 is `128 + SIGKILL(9)`. Nextflow's own trace records this whenever a task's underlying process receives SIGKILL — in practice this is how both Linux cgroup OOM killers and Nextflow's own `resourceLimits` enforcement terminate a process that exceeds its configured memory. It is not evidence of a code bug in the tool being run; it is evidence the task was given less memory than it needed.
+
+**Ruled out as the cause here (Observed, this run):** not an input data problem — the same trimmed FASTQ pair that failed under the 400MB cap is the same input that succeeds under the pipeline's normal (multi-GB) STAR memory allocation; only the configured memory limit changed between runs.
+
+**Threshold:** none needed — a `FAILED` status is itself the finding, not a value derived from a baseline across samples. This makes it a different kind of rule from Rule candidate 1: it does not require `n >= 3` samples or any spread to evaluate, and it fires on a single run of any size.
+
 ## Next
-Rule candidate 1 (relative `unmapped_tooshort_percent` outlier) is the first rule with enough traceable grounding to implement in the Go classifier. Rule candidate 2 stays out of the classifier until resolved.
+Rule candidate 1 (relative `unmapped_tooshort_percent` outlier) and rule candidate 3 (task-level `FAILED` status) are implemented in the Go classifier (`internal/classify.UnmappedTooShortOutliers`, `internal/classify.FailedTasks`). Rule candidate 2 stays out of the classifier until resolved.

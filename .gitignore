@@ -5,6 +5,8 @@
 work/
 results/
 results_real*/
+results_fail/
+fail_run.log
 
 # Pipeline input data (large, not source)
 fastq/
@@ -32,6 +34,9 @@ user_testing_results.csv
 
 # macOS
 .DS_Store
+
+# Secrets
+.env
 
 # Build output
 /flowcast
