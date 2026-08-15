@@ -1,20 +1,20 @@
 # FlowCast
 
-FlowCast is a Go CLI that diagnoses nf-core/rnaseq pipeline runs. It parses Nextflow's `execution_trace.txt` and MultiQC's `multiqc_data.json`, runs a rule-based classifier over the real QC fields to flag outlier samples, and hands the findings to an LLM narrator that explains them — with every claim tagged by how well-supported it actually is.
+FlowCast is a Go CLI that diagnoses nf-core/rnaseq pipeline runs. It parses Nextflow's `execution_trace.txt` and MultiQC's `multiqc_data.json`, runs a rule-based classifier over the real trace and QC fields — outlier samples on healthy runs, and outright task failures — and hands the findings to an LLM narrator that explains them, with every claim tagged by how well-supported it actually is.
 
 ## About
 
 This started as a question about a specific failure mode in bioinformatics tooling: pipeline QC reports (MultiQC, Nextflow trace files) surface plenty of numbers, but nothing that tells a wet-lab scientist *why* a sample looks off, and LLMs are happy to fill that gap with a plausible-sounding but unverified guess. FlowCast's actual bet isn't the classifier — it's the confidence-tagging discipline (`Observed` / `Reported` / `Unknown`) enforced end to end, from the reasoning document through the JSON schema. Every rule in the classifier has to trace to a documented mechanism in `REASONING.md` before it's allowed to exist; if it can't, it stays out, no matter how easy it would be to add.
 
-The project was built against one real nf-core/rnaseq run on real (if partial) sequencing data from a public yeast dataset — not synthetic fixtures — specifically so the classifier's one implemented rule (an outlier check on STAR's `unmapped_tooshort_percent`) would be grounded in something real rather than invented to make a demo look good. See `STATUS.md` for the full build history, including a mid-project pivot when toy test data turned out to be uninformative.
+The project was built against real nf-core/rnaseq runs on real (if partial) sequencing data from a public yeast dataset — not synthetic fixtures. The first classifier rule (an outlier check on STAR's `unmapped_tooshort_percent`) is grounded in a real run that succeeded; a second rule was added later by deliberately inducing a real pipeline failure (a memory-starved STAR alignment step, genuinely OOM-killed) rather than fabricating a failure trace, specifically so the classifier's failure-detection claim would be backed by evidence, not just outlier detection on healthy data. See `STATUS.md` for the full build history.
 
 ## My honest opinion on the project
 
-**What's genuinely good:** the confidence-tagging discipline is the right idea, executed consistently rather than just claimed in the README. The project caught its own toy-data problem (§2.2 of `STATUS.md`) instead of building a classifier on noise, and it deliberately left a second candidate rule (uniform FastQC failures) unimplemented because the mechanism wasn't resolved — that's a harder discipline to hold than it sounds, especially when the easy thing would be to ship the rule anyway. Two independently implemented narrators (Go/OpenAI and Python) converging on the same confidence tags from the same evidence is real, checkable evidence that the tagging lives in the prompt and reasoning document, not in one model's quirks.
+**What's genuinely good:** the confidence-tagging discipline is the right idea, executed consistently rather than just claimed in the README. The project caught its own toy-data problem early (`STATUS.md` §2.2) instead of building a classifier on noise, and it deliberately left a second outlier-rule candidate (uniform FastQC failures) unimplemented because the mechanism wasn't resolved — that's a harder discipline to hold than it sounds, especially when the easy thing would be to ship the rule anyway. Two independently implemented narrators (Go/OpenAI and Python) converging on the same confidence tags from the same evidence is real, checkable evidence that the tagging lives in the prompt and reasoning document, not in one model's quirks. The task-failure rule closes what was previously the project's biggest real gap: every earlier run had succeeded, so nothing had actually been tested against a failure. It has now — verified end to end, narrator included, against a real induced OOM kill.
 
-**What's overbuilt relative to what's proven:** the event log + cross-language replay (v2) is honestly labeled in `STATUS.md` (AD-10) as a portfolio-positioning decision, not something a real bug or limitation forced — and that labeling is correct. As infrastructure it's more sophisticated than the one classifier rule it's currently in service of. It's fine as a demonstration of engineering range, but it's not load-bearing for the tool's stated purpose yet.
+**What's overbuilt relative to what's proven:** the event log + cross-language replay is honestly labeled in `STATUS.md` (AD-10) as a portfolio-positioning decision, not something a real bug or limitation forced — and that labeling is correct. As infrastructure it's more sophisticated than the two classifier rules it currently serves. Fine as a demonstration of engineering range, not yet load-bearing for the tool's stated purpose.
 
-**The real gap:** every run FlowCast has diagnosed so far *succeeded*. The tool's stated purpose is diagnosing pipeline *failures*, and there's no real failed run in evidence — every rule that exists is a within-run outlier check, not a failure classifier. That's the actual next milestone, not another cross-language feature. n=5 samples is also just a small evidence base for a "modified z-score across the run" rule; it's defensible as a robust-statistics convention rather than a tuned threshold, but it hasn't been tested against a second independent dataset yet, so I wouldn't over-trust the rule's generality until it has.
+**What's still thin:** both classifier rules rest on a single real run each — the outlier rule on n=5 samples, the failure rule on one induced failure. Both are defensible as general, established mechanisms (a robust-statistics convention; SIGKILL/exit-137 semantics) rather than values tuned to one dataset, but neither has been tested against a second independent dataset yet, so I wouldn't over-trust either rule's generality until it has.
 
 ## Why
 
@@ -26,8 +26,8 @@ Pipeline QC reports are full of numbers but short on narration. FlowCast's narra
 
 ## How it works
 
-1. **Parse** — `internal/nftrace` reads the tab-separated Nextflow trace; `internal/multiqc` reads the relevant STAR alignment section out of MultiQC's JSON.
-2. **Classify** — `internal/classify` runs a rule-based outlier check (a modified z-score over `unmapped_tooshort_percent` across samples) to flag samples that diverge from the run's own baseline.
+1. **Parse** — `internal/nftrace` reads the tab-separated Nextflow trace; `internal/multiqc` reads the relevant STAR alignment section out of MultiQC's JSON (optional — see below).
+2. **Classify** — `internal/classify` runs two rules: `FailedTasks` flags any trace task with status `FAILED` (no baseline needed — a single real failure is itself the finding), and `UnmappedTooShortOutliers` runs a modified z-score over `unmapped_tooshort_percent` across samples to flag within-run outliers on otherwise-healthy data.
 3. **Narrate** — `internal/narrator` sends the classifier's findings, plus a written causal-reasoning reference, to an LLM (OpenAI, structured JSON output) and returns confidence-tagged claims.
 4. **Event log + replay** — every stage can optionally emit events into a shared SQLite log (`internal/eventlog`), written to by both the Go pipeline and an independent Python narrator (`python/`). `flowcast replay` plays the whole log back, interleaved by timestamp, regardless of which language wrote which event.
 
@@ -38,6 +38,10 @@ go build -o flowcast ./cmd/flowcast
 
 # Run the pipeline: parse trace + MultiQC data, classify, narrate
 ./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning REASONING.md
+
+# -multiqc is optional: a failed run may never produce MultiQC output for the
+# failed sample, so the FAILED-task rule works off the trace alone
+./flowcast -trace execution_trace.txt -reasoning REASONING.md
 
 # Same, but also write every stage's events into a shared SQLite log
 ./flowcast -trace execution_trace.txt -multiqc multiqc_data.json -reasoning REASONING.md -eventlog events.db
