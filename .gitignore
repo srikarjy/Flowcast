@@ -35,5 +35,8 @@ user_testing_results.csv
 # macOS
 .DS_Store
 
+# Secrets
+.env
+
 # Build output
 /flowcast

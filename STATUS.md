@@ -14,7 +14,7 @@ FlowCast is a Go CLI that diagnoses nf-core/rnaseq runs. It parses Nextflow's `e
 
 **v1 scope: complete and verified end-to-end on real data.**
 **v2 scope (event log, replay, Python SDK): complete and verified, with one documented limitation.**
-**v3 scope (task-level failure classifier, rule candidate 3): complete and verified against a real, deliberately induced failure (§2.9). Not yet verified: the narrator has not been run against this finding type — blocked on an `OPENAI_API_KEY` not being available in the environment where this was built.**
+**v3 scope (task-level failure classifier, rule candidate 3): complete and verified end-to-end, including the narrator (§2.9).**
 
 Current build state: `go build ./...` and `go vet ./...` pass; `go test ./...` passes. Test coverage: `internal/nftrace`, `internal/multiqc`, `internal/classify`, `internal/eval` — `internal/narrator`, `internal/eventlog`, and `internal/tracing` still have none.
 
@@ -105,7 +105,7 @@ Done by capping `STAR_ALIGN`'s memory at 400MB (`low_mem_fail.config`) — well 
 
 Real trace fixture (30 lines, 5.6KB) checked into `internal/classify/testdata/`, unlike the large `results_real` fixtures — small enough to version directly rather than gitignore, so `TestFailedTasks_RealFixture` runs unconditionally in CI rather than skipping when the fixture is absent.
 
-**Not yet verified:** the narrator has not been run against this finding type. The classifier and its detail string are proven; whether the narrator correctly tags a `task_failed` claim as Observed vs. Reported (exit-code semantics are a documented mechanism, arguably Reported rather than Observed) has not been checked, because `OPENAI_API_KEY` was not available in the environment where this was built. This is the one open item from v3.
+**Narrator verified (2026-08-15):** run against the real `task_failed` finding, the narrator returned 4 claims — 2 `Reported` (the exit-137/SIGKILL mechanism and its OOM interpretation, both correctly cited to REASONING.md's rule candidate 3, not asserted from general training knowledge) and 2 `Observed` (the task's actual recorded duration, and the ruled-out-input-data check). No fabricated root cause, and no `Unknown` was needed here — unlike WT_REP1's outlier, this finding's mechanism is fully documented rather than genuinely unresolved, so the narrator correctly did not manufacture uncertainty where the evidence doesn't call for it. This closes the one open item from v3.
 
 ---
 
@@ -131,7 +131,6 @@ Previously the main gap: every pipeline run had succeeded, so every rule was a w
 
 - Test coverage: `nftrace`, `multiqc`, `classify`, and `eval` all have tests now. `narrator`, `eventlog`, and `tracing` still have none.
 - `WT_REP1`'s root cause remains genuinely Unknown — real candidates (biological wild-type variation in rRNA/contaminant load or RNA integrity, versus a batch/library-prep effect specific to this SRA run) are not distinguished by current data. This is a correct output, not a gap to close by guessing.
-- The narrator has not been run against the new `task_failed` finding type (§2.9) — needs `OPENAI_API_KEY`.
 - Working-tree clutter (already gitignored, not a repo problem, but worth a local cleanup): `flowcast_events.db`, ~2MB of `.nextflow.log*` files, and `miniconda.sh` (a 155MB installer) sitting in the repo root.
 
 ---
@@ -200,8 +199,6 @@ FlowCast is one narrow diagnostic layer. It does not compete with nf-prov / BCO 
 
 ## 5. Recommended order of work
 
-1. **Run the narrator against the real `task_failed` finding** (§2.9) — needs `OPENAI_API_KEY`; the last unverified link in v3.
-2. Merge PR #2 (task-level failure classifier) into `main` — currently open.
-3. Repo hygiene: `miniconda.sh`, `.nextflow.log*`, `flowcast_events.db` (§3.5).
-4. Add tests for `internal/narrator` and `internal/eventlog` (§3.5).
-5. Then, and only with a real reason: resolving rule candidate 2 (§3.3), or a second independent real dataset to test rule candidate 3's generality (§3.4).
+1. Repo hygiene: `miniconda.sh`, `.nextflow.log*`, `flowcast_events.db` (§3.5).
+2. Add tests for `internal/narrator` and `internal/eventlog` (§3.5).
+3. Then, and only with a real reason: resolving rule candidate 2 (§3.3), or a second independent real dataset to test rule candidate 3's generality (§3.4).
