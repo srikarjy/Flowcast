@@ -2,6 +2,20 @@
 
 FlowCast is a Go CLI that diagnoses nf-core/rnaseq pipeline runs. It parses Nextflow's `execution_trace.txt` and MultiQC's `multiqc_data.json`, runs a rule-based classifier over the real QC fields to flag outlier samples, and hands the findings to an LLM narrator that explains them — with every claim tagged by how well-supported it actually is.
 
+## About
+
+This started as a question about a specific failure mode in bioinformatics tooling: pipeline QC reports (MultiQC, Nextflow trace files) surface plenty of numbers, but nothing that tells a wet-lab scientist *why* a sample looks off, and LLMs are happy to fill that gap with a plausible-sounding but unverified guess. FlowCast's actual bet isn't the classifier — it's the confidence-tagging discipline (`Observed` / `Reported` / `Unknown`) enforced end to end, from the reasoning document through the JSON schema. Every rule in the classifier has to trace to a documented mechanism in `REASONING.md` before it's allowed to exist; if it can't, it stays out, no matter how easy it would be to add.
+
+The project was built against one real nf-core/rnaseq run on real (if partial) sequencing data from a public yeast dataset — not synthetic fixtures — specifically so the classifier's one implemented rule (an outlier check on STAR's `unmapped_tooshort_percent`) would be grounded in something real rather than invented to make a demo look good. See `STATUS.md` for the full build history, including a mid-project pivot when toy test data turned out to be uninformative.
+
+## My honest opinion on the project
+
+**What's genuinely good:** the confidence-tagging discipline is the right idea, executed consistently rather than just claimed in the README. The project caught its own toy-data problem (§2.2 of `STATUS.md`) instead of building a classifier on noise, and it deliberately left a second candidate rule (uniform FastQC failures) unimplemented because the mechanism wasn't resolved — that's a harder discipline to hold than it sounds, especially when the easy thing would be to ship the rule anyway. Two independently implemented narrators (Go/OpenAI and Python) converging on the same confidence tags from the same evidence is real, checkable evidence that the tagging lives in the prompt and reasoning document, not in one model's quirks.
+
+**What's overbuilt relative to what's proven:** the event log + cross-language replay (v2) is honestly labeled in `STATUS.md` (AD-10) as a portfolio-positioning decision, not something a real bug or limitation forced — and that labeling is correct. As infrastructure it's more sophisticated than the one classifier rule it's currently in service of. It's fine as a demonstration of engineering range, but it's not load-bearing for the tool's stated purpose yet.
+
+**The real gap:** every run FlowCast has diagnosed so far *succeeded*. The tool's stated purpose is diagnosing pipeline *failures*, and there's no real failed run in evidence — every rule that exists is a within-run outlier check, not a failure classifier. That's the actual next milestone, not another cross-language feature. n=5 samples is also just a small evidence base for a "modified z-score across the run" rule; it's defensible as a robust-statistics convention rather than a tuned threshold, but it hasn't been tested against a second independent dataset yet, so I wouldn't over-trust the rule's generality until it has.
+
 ## Why
 
 Pipeline QC reports are full of numbers but short on narration. FlowCast's narrator doesn't get to invent a root cause just because it sounds plausible — every claim it makes is tagged:

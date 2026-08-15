@@ -16,9 +16,22 @@ import (
 	"flowcast/internal/multiqc"
 	"flowcast/internal/narrator"
 	"flowcast/internal/nftrace"
+	"flowcast/internal/tracing"
 )
 
 func main() {
+	// Initialize OpenTelemetry tracing
+	shutdown, err := tracing.InitTracer("flowcast")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize tracing: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "error shutting down tracer: %v\n", err)
+		}
+	}()
+
 	if len(os.Args) > 1 && os.Args[1] == "replay" {
 		runReplay(os.Args[2:])
 		return
@@ -197,6 +210,10 @@ func runReplay(args []string) {
 // runPipeline is the original `flowcast -trace ... -multiqc ...` pipeline,
 // unchanged in default behavior, with an added optional -eventlog flag.
 func runPipeline(args []string) {
+	ctx := context.Background()
+	ctx, span := tracing.StartSpan(ctx, "flowcast.pipeline")
+	defer span.End()
+
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	tracePath := fs.String("trace", "", "path to Nextflow execution_trace.txt")
 	multiqcPath := fs.String("multiqc", "", "path to MultiQC multiqc_data.json")
@@ -220,8 +237,12 @@ func runPipeline(args []string) {
 		defer elog.Close()
 	}
 
+	// Trace: load Nextflow trace
+	ctx, span = tracing.StartSpan(ctx, "load_nftrace")
 	tasks, err := nftrace.LoadTasks(*tracePath)
+	span.End()
 	if err != nil {
+		tracing.RecordError(ctx, err)
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -245,14 +266,21 @@ func runPipeline(args []string) {
 		}
 	}
 
+	// Trace: load MultiQC stats
+	ctx, span = tracing.StartSpan(ctx, "load_multiqc")
 	stars, err := multiqc.LoadStarStats(*multiqcPath)
+	span.End()
 	if err != nil {
+		tracing.RecordError(ctx, err)
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("\nparsed STAR stats for %d samples from %s\n", len(stars), *multiqcPath)
 
+	// Trace: classify
+	ctx, span = tracing.StartSpan(ctx, "classify")
 	findings := classify.UnmappedTooShortOutliers(stars)
+	span.End()
 	if len(findings) == 0 {
 		fmt.Println("classifier: no findings")
 		return
@@ -275,9 +303,13 @@ func runPipeline(args []string) {
 		return
 	}
 
+	// Trace: narrate
 	fmt.Println("\nnarrator claims:")
-	claims, err := narrator.Narrate(context.Background(), findings, string(reasoningDoc))
+	ctx, span = tracing.StartSpan(ctx, "narrate")
+	claims, err := narrator.Narrate(ctx, findings, string(reasoningDoc))
+	span.End()
 	if err != nil {
+		tracing.RecordError(ctx, err)
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
